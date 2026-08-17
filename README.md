@@ -8,16 +8,7 @@ A napari plugin for:
 
 ## Requirements
 
-| Software | Version |
-|---|---|
-| Python | 3.12 |
-| napari | ≥ 0.5.0 |
-| PyQt6 | Current conda-forge version |
-| NumPy | ≥ 1.26 |
-| Pandas | ≥ 2.1 |
-| nd2 | ≥ 0.9 |
-| btrack | ≥ 0.6 |
-| pydantic | ≥ 2.0 |
+See the complete [Installation and User Instructions](INSTALLATION_AND_USER_INSTRUCTIONS.md)
 
 ## Installation and use
 
@@ -61,12 +52,6 @@ Install the package with testing dependencies from the repository root:
 conda env create -f environment.yml
 conda activate single-cell-death-annotate
 python -m pip install -e ".[testing]"
-```
-
-Run the tests with:
-
-```bash
-pytest tests/ -v
 ```
 
 Editable installation means source changes are available after restarting napari.
