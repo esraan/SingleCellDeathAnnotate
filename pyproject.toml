@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "single-cell-death-annotate"
+version = "0.1.0"
+description = "A napari plugin for manual segmentation, tracking, and single-cell death annotation"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    {name = "Esraa Nsasra", email = "esraan@post.bgu.ac.il"}
+]
+license = {text = "BSD-3-Clause"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "napari>=0.5.0",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "qtpy>=2.4",
+    "nd2>=0.9",
+    "btrack>=0.6",
+    "pydantic>=2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+single_cell_death_annotate = ["napari.yaml"]
+
+[project.optional-dependencies]
+testing = [
+    "pytest>=7.4",
+    "pytest-qt>=4.2",
+]
+
+[project.entry-points."napari.manifest"]
+single-cell-death-annotate = "single_cell_death_annotate:napari.yaml"

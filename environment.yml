@@ -1,0 +1,22 @@
+name: single-cell-death-annotate
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  # Qt backend
+  - pyqt6
+  # Core scientific stack
+  - numpy>=1.26
+  - pandas>=2.1
+  - scipy>=1.11
+  # Image I/O
+  - tifffile>=2023.1
+  - nd2>=0.9
+  # napari (conda-forge build brings in all C-level vispy deps)
+  - napari>=0.5.0
+  - pip:
+      - btrack>=0.6.0
+  # NOTE: SingleCellDeathAnnotate itself is installed manually after env creation:
+  #   pip install -e /path/to/SingleCellDeathAnnotate

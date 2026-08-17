@@ -1,0 +1,10 @@
+name: single-cell-death-annotate
+display_name: SingleCellDeathAnnotate
+contributions:
+  commands:
+    - id: single-cell-death-annotate.make_qwidget
+      python_name: single_cell_death_annotate._widget:SingleCellDeathAnnotateWidget
+      title: Make SingleCellDeathAnnotate Widget
+  widgets:
+    - command: single-cell-death-annotate.make_qwidget
+      display_name: SingleCellDeathAnnotate
