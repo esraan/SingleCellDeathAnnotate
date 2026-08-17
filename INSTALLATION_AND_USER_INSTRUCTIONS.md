@@ -136,7 +136,7 @@ Each time you want to use the plugin:
 The file chooser supports `.tif`, `.tiff`, `.png`, `.jpg`, `.jpeg`, and `.nd2` images.
 4. Click and drag on the file layer to Move the opened file layer at the bottem of layer list
 
-### 2. Understand the napari window
+### 2. Overview over the napari window
 
 The main areas are:
 
