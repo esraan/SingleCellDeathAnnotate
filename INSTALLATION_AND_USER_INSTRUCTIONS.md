@@ -7,7 +7,7 @@ Instructions are provided for both Windows and macOS.
 
 ## A. Install Anaconda
 
-1. Go to the [Anaconda download page](https://www.anaconda.com/download/success).
+1. Go to the [Anaconda download page](https://www.anaconda.com/download/success) or [here](https://www.anaconda.com/download/success?reg=skipped).
 2. Download the installer for your operating system. The website usually detects it automatically.
 3. Open the downloaded installer.
 
@@ -32,14 +32,18 @@ Instructions are provided for both Windows and macOS.
 ### 1. Obtain the plugin folder
 
 Download or copy the complete `SingleCellDeathAnnotate` folder to your computer. Do not move or delete it after installation.
-You can use:
+You can use (either option A or B, not both):
+#### option A
 ```text
 cd "C:\Users\YourName\Documents" #change to desired location
 git clone https://github.com/esraan/SingleCellDeathAnnotate.git
 cd SingleCellDeathAnnotate
 ```
+#### option B
+go to the green button with (<> Code ^) on the upper part of the page, choose Download ZIP, unarchive it, move it to the desired location on your storage.
 
-The folder must contain at least these files and folders:
+
+After this step, the folder must contain at least these files and folders:
 
 - `environment.yml`
 - `pyproject.toml`
@@ -47,7 +51,7 @@ The folder must contain at least these files and folders:
 
 ### 2. Open a command window
 
-- **Windows:** Open the Start menu and search for **Anaconda Prompt**.
+- **Windows:** Open the Start menu and search for **Command Prompt**.
 - **macOS:** Press `Command + Space`, search for **Terminal**, and open it.
 
 ### 3. Copy the plugin folder path (or use the desired location chosen in 1)
@@ -67,20 +71,20 @@ cd "C:\Users\YourName\Downloads\SingleCellDeathAnnotate"
 
 ### 5. Create the environment
 
-Enter each command separately. Wait for a command to finish before entering the next one.
-
+Enter each command separately in **Command Prompt** or **Terminal**, based on your system. Wait for a command to finish before entering the next one.
+#### i.
 ```text
 conda env create -f environment.yml
 ```
 
 This step can take several minutes. If you are asked whether to proceed, type `y` and press `Enter`.
-
+#### ii.
 Activate the new environment:
 
 ```text
 conda activate single-cell-death-annotate
 ```
-
+#### iii.
 Install the local plugin:
 
 ```text
@@ -88,12 +92,13 @@ python -m pip install -e .
 ```
 
 ### 6. Start napari
+To start the plug-in : 
 
 ```text
 napari
 ```
 
-In napari, select:
+In napari, select in the upper toolbar:
 
 ```text
 Plugins > SingleCellDeathAnnotate
@@ -129,12 +134,13 @@ Each time you want to use the plugin:
 3. Select an image and click **Open**.
 
 The file chooser supports `.tif`, `.tiff`, `.png`, `.jpg`, `.jpeg`, and `.nd2` images.
+4. Click and drag on the file layer to Move the opened file layer at the bottem of layer list
 
 ### 2. Understand the napari window
 
 The main areas are:
 
-1. **Viewer and toolbar:** display, pan, zoom, select, paint, and annotate.
+1. **Viewer and toolbar:** delete, add point (annotate), select point(s), pan/zoom to Move around.
 2. **Layer list:** select a layer or click its eye icon to show/hide it.
 3. **Layer controls:** options for the currently selected layer.
 4. **SingleCellDeathAnnotate panel:** the plugin tools in two tabs.
@@ -144,7 +150,7 @@ Use napari's pan/zoom tool to move around the image and zoom in or out.
 ## E. Death-event annotation
 
 1. Open the **Death Events** tab.
-2. Click **Enable Annotation Mode**. The button changes to **Annotation Mode Active**.
+2. Click **Enable Annotation Mode**. The button changes to **Annotation Mode Active**. EACH TIME YOU ANNOTATE THIS SHOULD BE ACTIVE (red light), otherwise, results are not being saved.
 3. Move to the frame where the cell dies. This frame is recorded automatically as `death_time`.
 4. Click directly on the cell at the time of death.
 5. In the popup, choose the event type:
