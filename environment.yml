@@ -6,7 +6,7 @@ dependencies:
   - python=3.12
   - pip
   # Qt backend
-  - pyqt6
+  - pyqt=5.15
   # Core scientific stack
   - numpy>=1.26
   - pandas>=2.1
@@ -18,5 +18,5 @@ dependencies:
   - napari>=0.5.0
   - pip:
       - btrack>=0.6.0
-  # NOTE: SingleCellDeathAnnotate itself is installed manually after env creation:
-  #   pip install -e /path/to/SingleCellDeathAnnotate
+  # NOTE: napari-decelldq itself is installed manually after env creation:
+  #   pip install -e /path/to/napari-decelldq
