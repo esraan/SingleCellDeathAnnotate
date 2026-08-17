@@ -32,6 +32,12 @@ Instructions are provided for both Windows and macOS.
 ### 1. Obtain the plugin folder
 
 Download or copy the complete `SingleCellDeathAnnotate` folder to your computer. Do not move or delete it after installation.
+You can use:
+```text
+cd "C:\Users\YourName\Documents" #change to desired location
+git clone https://github.com/esraan/SingleCellDeathAnnotate.git
+cd SingleCellDeathAnnotate
+```
 
 The folder must contain at least these files and folders:
 
@@ -44,7 +50,7 @@ The folder must contain at least these files and folders:
 - **Windows:** Open the Start menu and search for **Anaconda Prompt**.
 - **macOS:** Press `Command + Space`, search for **Terminal**, and open it.
 
-### 3. Copy the plugin folder path
+### 3. Copy the plugin folder path (or use the desired location chosen in 1)
 
 - **Windows:** Hold `Shift`, right-click the `SingleCellDeathAnnotate` folder, and select **Copy as path**.
 - **macOS:** Hold `Option`, right-click the `SingleCellDeathAnnotate` folder, and select **Copy “SingleCellDeathAnnotate” as Pathname**.
