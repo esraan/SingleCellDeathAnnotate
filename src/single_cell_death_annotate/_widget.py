@@ -52,13 +52,18 @@ def _load_image_file_dialog(parent_widget, viewer):
         channel_axis = None
 
     if channel_axis is not None:
-        viewer.add_image(
+        channel_layers = viewer.add_image(
             data,
             name=os.path.basename(file_path),
             channel_axis=channel_axis,
             rgb=False,
             metadata={"source": "nd2", "path": file_path, "channel_names": channel_names},
         )
+        if not isinstance(channel_layers, (list, tuple)):
+            channel_layers = [channel_layers]
+        for channel_index, layer in enumerate(channel_layers):
+            layer.metadata['channel_index'] = channel_index
+            layer.metadata['channel_count'] = len(channel_layers)
     else:
         viewer.add_image(
             data,
@@ -433,15 +438,17 @@ class DeathEventTab(QWidget):
         self._btn_enable.setToolTip(
             "Toggle annotation mode.\n"
             "While ON, every left-click opens the event-type dialog.\n"
-            "Choose napari's Points select tool to leave annotation mode."
+            "Napari's Add Points tool also enables annotation mode; "
+            "choosing another Points tool disables it."
         )
         self._btn_enable.clicked.connect(self._toggle_drawing)
         layout.addWidget(self._btn_enable)
 
         lbl_info = QLabel(
-            "<i>Enable annotation mode then click on a cell. "
+            "<i>Enable annotation mode with this button or napari's Add Points tool, "
+            "then click on a cell. "
             "A dialog asks for the event type. "
-            "Choose the Points select tool when you want to select/delete.</i>"
+            "Choose another Points tool when you want to leave annotation mode.</i>"
         )
         lbl_info.setWordWrap(True)
         layout.addWidget(lbl_info)
@@ -622,9 +629,17 @@ class DeathEventTab(QWidget):
         )
 
     def _on_points_mode_changed(self, event=None) -> None:
-        if self._changing_annotation_tool or not self._drawing_active:
+        if self._changing_annotation_tool:
             return
-        if self.points.mode != 'pan_zoom':
+
+        if self.points.mode == 'add':
+            # Treat napari's Add Points control as a second way to press the
+            # plugin's activation button.  Internally we immediately use
+            # pan_zoom so napari cannot insert an unclassified point before
+            # the event-type dialog has been confirmed.
+            self._set_drawing_active(True)
+            print("Annotation mode enabled with napari's Add Points tool.")
+        elif self._drawing_active and self.points.mode != 'pan_zoom':
             self._set_drawing_active(False)
             print("Annotation mode disabled because a napari Points tool was selected.")
 
@@ -815,39 +830,139 @@ class DeathEventTab(QWidget):
         if not file_path:
             return
 
-        df = pd.read_csv(file_path)
-        if not {'x', 'y', 'death_time', 'event_type'}.issubset(df.columns) and not {'x', 'y', 'death_time', 'event_code'}.issubset(df.columns):
-            print("Invalid CSV format. Required columns missing.")
+        try:
+            df = pd.read_csv(file_path)
+        except Exception as e:
+            print(f"Failed to read annotation CSV: {e}")
             return
 
-        self.annotations = []
-        self.cell_id_map = {}
-        self.next_cell_id = 1
+        required = {'x', 'y', 'death_time'}
+        if not required.issubset(df.columns) or not ({'event_code', 'event_type'} & set(df.columns)):
+            print("Invalid CSV format. Required columns: x, y, death_time, and event_code or event_type.")
+            return
 
-        for _, row in df.iterrows():
-            pixel = [row['death_time'], row['y'], row['x']]
-            if 'z' in df.columns:
-                pixel.append(row['z'])
-            coord_key = tuple(pixel[1:])
-            if coord_key not in self.cell_id_map:
-                if 'cell_id' in row:
-                    self.cell_id_map[coord_key] = int(row['cell_id'])
-                    self.next_cell_id = max(self.next_cell_id, int(row['cell_id']) + 1)
+        # Match the annotations to the currently loaded image.  Older saves
+        # include a zero-filled z column even for (time, y, x) images, so the
+        # mere presence of that column must not create a fourth point axis.
+        target_ndim = self.viewer.dims.ndim
+        image_layer = self._select_channel_zero_image()
+        if image_layer is not None:
+            target_ndim = image_layer.ndim
+
+        loaded_annotations = []
+        loaded_cell_id_map = {}
+        next_cell_id = 1
+        reverse_event_mapping = {
+            name.casefold(): code for name, code in self.event_type_mapping.items()
+        }
+
+        try:
+            for _, row in df.iterrows():
+                if target_ndim <= 2:
+                    pixel = [row['y'], row['x']]
+                elif target_ndim == 3:
+                    pixel = [row['death_time'], row['y'], row['x']]
                 else:
-                    self.cell_id_map[coord_key] = self.next_cell_id
-                    self.next_cell_id += 1
-            cell_id = self.cell_id_map[coord_key]
-            
-            code = int(row['event_code']) if 'event_code' in row else int(row['event_type'])
-            self.annotations.append((np.array(pixel, dtype=int), int(row['death_time']), code, cell_id))
+                    if 'z' not in df.columns or pd.isna(row['z']):
+                        raise ValueError("the loaded image has a z axis, but the CSV has no z value")
+                    # napari axis order for a time/z image is (t, z, y, x).
+                    pixel = [row['death_time'], row['z'], row['y'], row['x']]
 
-        if self.annotations:
-            target_ndim = len(self.annotations[0][0])
-            self._ensure_points_layers(target_ndim)
-            self._rebuild_red_layer()
-            self._update_persistent_layer()
-            
-        print(f"Loaded annotations from {file_path}")
+                pixel = np.asarray(pixel, dtype=float)
+                if not np.isfinite(pixel).all():
+                    raise ValueError("coordinate values must be finite numbers")
+                pixel = np.rint(pixel).astype(int)
+
+                coord_key = tuple(pixel[1:]) if target_ndim > 2 else tuple(pixel)
+                if coord_key not in loaded_cell_id_map:
+                    if 'cell_id' in df.columns and not pd.isna(row['cell_id']):
+                        cell_id = int(row['cell_id'])
+                        loaded_cell_id_map[coord_key] = cell_id
+                        next_cell_id = max(next_cell_id, cell_id + 1)
+                    else:
+                        loaded_cell_id_map[coord_key] = next_cell_id
+                        next_cell_id += 1
+                cell_id = loaded_cell_id_map[coord_key]
+
+                if 'event_code' in df.columns and not pd.isna(row['event_code']):
+                    code = int(row['event_code'])
+                else:
+                    event_value = row['event_type']
+                    try:
+                        code = int(event_value)
+                    except (TypeError, ValueError):
+                        code = reverse_event_mapping.get(str(event_value).strip().casefold())
+                        if code is None:
+                            raise ValueError(f"unknown event type: {event_value!r}")
+
+                frame_idx = int(row['death_time']) if target_ndim > 2 else 0
+                loaded_annotations.append((pixel, frame_idx, code, cell_id))
+        except (TypeError, ValueError, OverflowError) as e:
+            print(f"Invalid annotation CSV: {e}")
+            return
+
+        self.annotations = loaded_annotations
+        self.cell_id_map = loaded_cell_id_map
+        self.next_cell_id = next_cell_id
+
+        self._ensure_points_layers(target_ndim)
+        if image_layer is not None:
+            # Annotation coordinates are stored in image pixels.  Reusing the
+            # channel-0 transform keeps the point overlays aligned when the
+            # image has non-default scale or translation.
+            self.points.scale = image_layer.scale
+            self.points.translate = image_layer.translate
+            self.persistent_points.scale = image_layer.scale
+            self.persistent_points.translate = image_layer.translate
+        self._rebuild_red_layer()
+        self._update_persistent_layer()
+        self.viewer.layers.selection.active = self.points
+
+        print(f"Loaded {len(self.annotations)} annotation(s) from {file_path}")
+
+    def _select_channel_zero_image(self):
+        """Return channel 0 and show it when a split multi-channel image exists."""
+        image_layers = [
+            layer for layer in self.viewer.layers
+            if isinstance(layer, napari.layers.Image)
+        ]
+        if not image_layers:
+            return None
+
+        # New ND2 loads carry an explicit index.  For images loaded with an
+        # older plugin version, identify split channels by their shared path
+        # and the channel_names metadata written by that version.
+        explicit = [
+            layer for layer in image_layers
+            if 'channel_index' in getattr(layer, 'metadata', {})
+        ]
+        if explicit:
+            channel_zero = next(
+                (layer for layer in explicit if int(layer.metadata['channel_index']) == 0),
+                explicit[0],
+            )
+            source_path = channel_zero.metadata.get('path')
+            siblings = [
+                layer for layer in explicit
+                if layer.metadata.get('path') == source_path
+            ]
+        else:
+            channel_zero = image_layers[0]
+            source_path = channel_zero.metadata.get('path')
+            channel_names = channel_zero.metadata.get('channel_names')
+            siblings = [
+                layer for layer in image_layers
+                if source_path is not None
+                and layer.metadata.get('path') == source_path
+                and layer.metadata.get('channel_names') == channel_names
+            ] if channel_names and len(channel_names) > 1 else []
+
+        if len(siblings) > 1:
+            for layer in siblings:
+                layer.visible = layer is channel_zero
+            print(f"Using channel 0 ({channel_zero.name}) as the annotation background.")
+
+        return channel_zero
 
     def _save_annotations(self):
         if not self.annotations:
@@ -859,9 +974,8 @@ class DeathEventTab(QWidget):
         codes = [ann[2] for ann in self.annotations]
         cell_ids = [ann[3] for ann in self.annotations]
 
-        disp = self.viewer.dims.displayed
-        x_vals = coords[:, disp[-1]]
-        y_vals = coords[:, disp[-2]]
+        x_vals = coords[:, -1]
+        y_vals = coords[:, -2]
 
         data = {
             'cell_id': cell_ids,
@@ -870,10 +984,8 @@ class DeathEventTab(QWidget):
             'x': x_vals,
             'y': y_vals,
         }
-        all_axes = set(range(coords.shape[1]))
-        z_axes = list(all_axes - set(disp))
-        if z_axes and coords.shape[1] > 3:
-            data['z'] = coords[:, z_axes[0]]
+        if coords.shape[1] > 3:
+            data['z'] = coords[:, -3]
         else:
             data['z'] = np.zeros(coords.shape[0])
 
@@ -903,9 +1015,8 @@ class DeathEventTab(QWidget):
         reverse_map = {v: k for k, v in self.event_type_mapping.items()}
         labels = [reverse_map.get(c, 'Unknown') for c in codes]
 
-        disp = self.viewer.dims.displayed
-        x = coords[:, disp[-1]]
-        y = coords[:, disp[-2]]
+        x = coords[:, -1]
+        y = coords[:, -2]
 
         data_decoded = {
             'cell_id': cell_ids,
@@ -915,10 +1026,8 @@ class DeathEventTab(QWidget):
             'x': x,
             'y': y,
         }
-        all_axes = set(range(coords.shape[1]))
-        z_axes = list(all_axes - set(disp))
-        if z_axes and coords.shape[1] > 3:
-            data_decoded['z'] = coords[:, z_axes[0]]
+        if coords.shape[1] > 3:
+            data_decoded['z'] = coords[:, -3]
         else:
             data_decoded['z'] = np.zeros(coords.shape[0])
 
