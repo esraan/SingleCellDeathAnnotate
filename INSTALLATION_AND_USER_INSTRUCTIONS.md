@@ -136,6 +136,19 @@ Each time you want to use the plugin:
 The file chooser supports `.tif`, `.tiff`, `.png`, `.jpg`, `.jpeg`, and `.nd2` images.
 4. Click and drag on the file layer to Move the opened file layer at the bottem of layer list
 
+### Multi-channel ND2 overlay
+
+For an ND2 file with a channel (`C`) axis, the plugin reads the ND2 axis order and
+channel names from the file metadata. Each channel is opened as a separate napari
+image layer and the **Channel Overlay** panel provides:
+
+- a checkbox to show or hide each channel; and
+- a **Choose Color** button to assign that channel's display color.
+
+Visible channels use additive blending, so they are displayed together. The
+initial palette is gray, green, magenta, cyan, yellow, orange, blue, and red;
+all colors can be changed without modifying the original ND2 data.
+
 ### 2. Overview over the napari window
 
 The main areas are:
@@ -233,4 +246,3 @@ Open the `.csv` file in Excel. If you edit it in Excel, preserve the column name
   conda activate single-cell-death-annotate
   python -m pip install -e .
   ```
-

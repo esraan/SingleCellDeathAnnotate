@@ -3,8 +3,10 @@ import napari
 import numpy as np
 import pandas as pd
 from single_cell_death_annotate._widget import (
+    ChannelOverlayControls,
     DeathEventTab,
     QFileDialog,
+    QCheckBox,
     SegmentationTrackingTab,
     SingleCellDeathAnnotateWidget,
 )
@@ -16,6 +18,40 @@ def test_widget_creation(make_napari_viewer):
     assert widget.tabs.count() == 2
     assert isinstance(widget.tabs.widget(0), SegmentationTrackingTab)
     assert isinstance(widget.tabs.widget(1), DeathEventTab)
+
+
+def test_channel_overlay_controls_configure_visibility_and_colors(
+    make_napari_viewer,
+):
+    viewer = make_napari_viewer()
+    metadata = {
+        'source': 'nd2',
+        'path': 'movie.nd2',
+        'channel_names': ['DAPI', 'GFP'],
+        'channel_count': 2,
+    }
+    channel_zero = viewer.add_image(
+        np.zeros((5, 16, 16)),
+        metadata={**metadata, 'channel_index': 0, 'channel_color': '#ffffff'},
+    )
+    channel_one = viewer.add_image(
+        np.zeros((5, 16, 16)),
+        metadata={**metadata, 'channel_index': 1, 'channel_color': '#00ff00'},
+    )
+    controls = ChannelOverlayControls(viewer)
+
+    controls.set_layers([channel_zero, channel_one])
+
+    assert channel_zero.blending == 'additive'
+    assert channel_one.blending == 'additive'
+    assert channel_zero.colormap.name.startswith('channel_0_')
+    assert channel_one.colormap.name.startswith('channel_1_')
+    checkboxes = controls.findChildren(QCheckBox)
+    assert [checkbox.text() for checkbox in checkboxes] == [
+        'Channel 0: DAPI', 'Channel 1: GFP'
+    ]
+    checkboxes[1].setChecked(False)
+    assert channel_one.visible is False
 
 def test_segmentation_add_labels(make_napari_viewer):
     viewer = make_napari_viewer()
