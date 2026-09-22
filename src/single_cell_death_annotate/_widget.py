@@ -8,10 +8,258 @@ import napari
 import numpy as np
 import pandas as pd
 from qtpy.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QInputDialog, QFileDialog, QTabWidget, QLineEdit
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QInputDialog,
+    QFileDialog, QTabWidget, QLineEdit, QCheckBox, QSpinBox, QDialog,
+    QDialogButtonBox, QComboBox, QFormLayout,
 )
+from napari.utils.colormaps import Colormap
 
-def _load_image_file_dialog(parent_widget, viewer):
+
+CHANNEL_COLORS = {
+    'gray': '#ffffff',
+    'green': '#00ff00',
+    'red': '#ff0000',
+    'blue': '#0000ff',
+    'cyan': '#00ffff',
+    'magenta': '#ff00ff',
+    'yellow': '#ffff00',
+}
+
+
+def _object_field(value, *names, default=None):
+    """Read the first matching field from dict- or object-based metadata."""
+    for name in names:
+        if isinstance(value, dict) and name in value:
+            return value[name]
+        if value is not None and hasattr(value, name):
+            try:
+                return getattr(value, name)
+            except Exception:
+                pass
+    return default
+
+
+def _rgb_components(value):
+    """Return an RGB triple from common ND2 colour representations."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().lstrip('#')
+        if len(text) in (6, 8):
+            try:
+                return tuple(int(text[i:i + 2], 16) for i in (0, 2, 4))
+            except ValueError:
+                return None
+    if isinstance(value, (tuple, list, np.ndarray)) and len(value) >= 3:
+        values = value[:3]
+    else:
+        values = [_object_field(value, key, key.upper()) for key in ('r', 'g', 'b')]
+    if any(component is None for component in values):
+        return None
+    try:
+        rgb = np.asarray(values, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if np.nanmax(rgb) <= 1:
+        rgb *= 255
+    return tuple(np.clip(np.rint(rgb), 0, 255).astype(int))
+
+
+def _suggest_channel_colormap(color=None, name=''):
+    """Map acquisition RGB/name metadata to one supported display colour."""
+    rgb = _rgb_components(color)
+    if rgb is not None:
+        palette = {
+            key: _rgb_components(value) for key, value in CHANNEL_COLORS.items()
+        }
+        return min(palette, key=lambda key: np.linalg.norm(
+            np.asarray(rgb) - np.asarray(palette[key])
+        ))
+    upper_name = str(name).upper()
+    aliases = (
+        ('DIC', 'gray'), ('BRIGHT', 'gray'), ('PHASE', 'gray'),
+        ('GFP', 'green'), ('FITC', 'green'),
+        ('MCHERRY', 'red'), ('CHERRY', 'red'), ('RFP', 'red'),
+        ('DAPI', 'blue'), ('CFP', 'cyan'), ('YFP', 'yellow'),
+    )
+    return next((colour for marker, colour in aliases if marker in upper_name), 'gray')
+
+
+def _nested_values(value, seen=None):
+    """Yield nested metadata values without depending on an ND2 model version."""
+    if value is None or isinstance(value, (str, bytes, int, float, bool)):
+        return
+    seen = seen or set()
+    if id(value) in seen:
+        return
+    seen.add(id(value))
+    if isinstance(value, dict):
+        children = value.values()
+    elif isinstance(value, (list, tuple)):
+        children = value
+    elif hasattr(value, '__dict__'):
+        children = vars(value).values()
+    else:
+        return
+    for child in children:
+        yield child
+        yield from _nested_values(child, seen)
+
+
+def _nd2_channel_details(nd2_file, channel_count):
+    """Extract ordered channel names and acquisition colour suggestions."""
+    metadata = _object_field(nd2_file, 'metadata')
+    candidates = _object_field(metadata, 'channels', default=None)
+    if candidates is None:
+        candidates = _object_field(nd2_file, 'channels', default=None)
+    if candidates is None:
+        candidates = next((value for value in _nested_values(metadata)
+                           if isinstance(value, (list, tuple))
+                           and len(value) == channel_count), [])
+    try:
+        candidates = list(candidates or [])
+    except TypeError:
+        candidates = []
+
+    names, colours = [], []
+    for index in range(channel_count):
+        channel = candidates[index] if index < len(candidates) else None
+        channel_nodes = [channel, *_nested_values(channel)]
+        name = next(
+            (_object_field(node, 'name', 'channel_name') for node in channel_nodes
+             if _object_field(node, 'name', 'channel_name')),
+            f'Channel {index}',
+        )
+        color = next(
+            (_object_field(node, 'color', 'colour') for node in channel_nodes
+             if _object_field(node, 'color', 'colour') is not None),
+            None,
+        )
+        names.append(str(name))
+        colours.append(_suggest_channel_colormap(color, name))
+    return names, colours
+
+
+def _read_nd2_image(file_path):
+    """Read ND2 lazily and retain the exact ordered axes from ``sizes``."""
+    import nd2
+    with nd2.ND2File(file_path) as nd2_file:
+        data = nd2_file.to_dask() if hasattr(nd2_file, 'to_dask') else nd2_file.asarray()
+        sizes = _object_field(nd2_file, 'sizes', default={})
+        try:
+            axes = tuple(str(axis).upper() for axis in sizes.keys())
+            declared_shape = tuple(int(size) for size in sizes.values())
+        except (AttributeError, TypeError, ValueError):
+            axes, declared_shape = (), ()
+        if len(axes) != data.ndim or (declared_shape and declared_shape != tuple(data.shape)):
+            raise ValueError(
+                f'ND2 axes/sizes {axes}/{declared_shape} do not match array shape {data.shape}'
+            )
+        channel_count = declared_shape[axes.index('C')] if 'C' in axes else 1
+        names, colours = _nd2_channel_details(nd2_file, channel_count)
+    return data, axes, names, colours
+
+
+def _channel_colormap(index, colour):
+    hex_colour = CHANNEL_COLORS.get(colour, colour)
+    rgb = np.asarray(_rgb_components(hex_colour), dtype=float) / 255
+    return Colormap([[0, 0, 0, 1], [*rgb, 1]], name=f'channel_{index}_{colour}')
+
+
+class ChannelOverlayControls(QWidget):
+    """Visibility controls for additive colour channel layers."""
+    def __init__(self, viewer):
+        super().__init__()
+        self.viewer = viewer
+        self._layout = QVBoxLayout()
+        self.setLayout(self._layout)
+
+    def set_layers(self, layers):
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        for index, layer in enumerate(layers):
+            metadata = getattr(layer, 'metadata', {})
+            channel_index = int(metadata.get('channel_index', index))
+            names = metadata.get('channel_names') or []
+            name = names[channel_index] if channel_index < len(names) else layer.name
+            colour = metadata.get('channel_color', '#ffffff')
+            layer.colormap = _channel_colormap(channel_index, colour)
+            layer.blending = 'additive'
+            checkbox = QCheckBox(f'Channel {channel_index}: {name}')
+            checkbox.setChecked(layer.visible)
+            checkbox.toggled.connect(lambda checked, target=layer: setattr(target, 'visible', checked))
+            self._layout.addWidget(checkbox)
+
+
+def _choose_channel_colormaps(parent, names, suggestions):
+    dialog = QDialog(parent)
+    dialog.setWindowTitle('Choose ND2 channel colours')
+    layout = QFormLayout(dialog)
+    combos = []
+    for name, suggestion in zip(names, suggestions):
+        combo = QComboBox()
+        combo.addItems(list(CHANNEL_COLORS))
+        combo.setCurrentText(suggestion)
+        layout.addRow(name, combo)
+        combos.append(combo)
+    buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    layout.addRow(buttons)
+    return [combo.currentText() for combo in combos] if dialog.exec() == QDialog.Accepted else None
+
+
+def _add_default_nd2_layer(viewer, data, path, axes, names, colours):
+    metadata = {'source': 'nd2', 'path': path, 'axes': axes,
+                'channel_names': names, 'channel_colors': colours}
+    return viewer.add_image(data, name=os.path.basename(path), rgb=False, metadata=metadata)
+
+
+def _add_nd2_channel_layers(viewer, data, path, axes, names, colours, overlay=False):
+    channel_axis = axes.index('C')
+    split_axes = tuple(axis for axis in axes if axis != 'C')
+    layers = []
+    for index, (name, colour) in enumerate(zip(names, colours)):
+        selection = [slice(None)] * data.ndim
+        selection[channel_axis] = index
+        metadata = {
+            'source': 'nd2', 'path': path, 'axes': split_axes,
+            'source_axes': axes, 'channel_axis': channel_axis,
+            'channel_index': index, 'channel_count': len(names),
+            'channel_names': names, 'channel_color': CHANNEL_COLORS[colour],
+        }
+        layer = viewer.add_image(
+            data[tuple(selection)], name=f'{os.path.basename(path)} - {name}',
+            rgb=False, colormap=(_channel_colormap(index, colour) if overlay else 'gray'),
+            blending=('additive' if overlay else 'translucent'), metadata=metadata,
+        )
+        layers.append(layer)
+    return layers
+
+
+def _display_nd2_image(parent, viewer, file_path, channel_mode):
+    data, axes, names, suggestions = _read_nd2_image(file_path)
+    if 'C' not in axes or data.shape[axes.index('C')] <= 1:
+        return _add_default_nd2_layer(viewer, data, file_path, axes, names, suggestions)
+    if channel_mode == 'default':
+        return _add_default_nd2_layer(viewer, data, file_path, axes, names, suggestions)
+    colours = suggestions
+    if channel_mode == 'overlay':
+        colours = _choose_channel_colormaps(parent, names, suggestions)
+        if colours is None:
+            return None
+    layers = _add_nd2_channel_layers(
+        viewer, data, file_path, axes, names, colours, overlay=channel_mode == 'overlay'
+    )
+    if channel_mode == 'overlay':
+        controls = ChannelOverlayControls(viewer)
+        controls.set_layers(layers)
+        viewer.window.add_dock_widget(controls, area='right', name='ND2 Channel Overlay')
+    return layers
+
+def _load_image_file_dialog(parent_widget, viewer, channel_mode='default'):
     file_path, _ = QFileDialog.getOpenFileName(
         parent_widget,
         "Select Image File",
@@ -29,48 +277,15 @@ def _load_image_file_dialog(parent_widget, viewer):
         return
 
     try:
-        import nd2
+        result = _display_nd2_image(parent_widget, viewer, file_path, channel_mode)
     except ImportError:
         print("ND2 detected but the 'nd2' package is not installed. Install with: pip install nd2")
         return
-
-    with nd2.ND2File(file_path) as f:
-        data = f.to_dask() if hasattr(f, "to_dask") else f.asarray()
-        axes = getattr(f, "axes", None)
-        try:
-            channel_names = [c.name for c in getattr(f, "channels", [])] or None
-        except Exception:
-            channel_names = None
-
-    if axes is not None:
-        axes_list = list(axes)
-        desired = [a for a in ["T", "Z", "C", "Y", "X"] if a in axes_list]
-        perm = [axes_list.index(a) for a in desired]
-        data = data.transpose(perm)
-        channel_axis = desired.index("C") if "C" in desired else None
-    else:
-        channel_axis = None
-
-    if channel_axis is not None:
-        channel_layers = viewer.add_image(
-            data,
-            name=os.path.basename(file_path),
-            channel_axis=channel_axis,
-            rgb=False,
-            metadata={"source": "nd2", "path": file_path, "channel_names": channel_names},
-        )
-        if not isinstance(channel_layers, (list, tuple)):
-            channel_layers = [channel_layers]
-        for channel_index, layer in enumerate(channel_layers):
-            layer.metadata['channel_index'] = channel_index
-            layer.metadata['channel_count'] = len(channel_layers)
-    else:
-        viewer.add_image(
-            data,
-            name=os.path.basename(file_path),
-            metadata={"source": "nd2", "path": file_path},
-        )
-    print(f"Loaded ND2 image {file_path}")
+    except Exception as error:
+        print(f"Failed to load ND2 image {file_path}: {error}")
+        return
+    if result is not None:
+        print(f"Loaded ND2 image {file_path}")
 
 
 # ----------------------------------------------------
@@ -87,6 +302,18 @@ class SegmentationTrackingTab(QWidget):
         btn_load_img = QPushButton("Load Image (TIFF/ND2)")
         btn_load_img.clicked.connect(lambda: _load_image_file_dialog(self, self.viewer))
         layout.addWidget(btn_load_img)
+
+        btn_split = QPushButton('Load and Split Channels (ND2)')
+        btn_split.clicked.connect(
+            lambda: _load_image_file_dialog(self, self.viewer, 'split')
+        )
+        layout.addWidget(btn_split)
+
+        btn_overlay = QPushButton("Load and Overlay Channels...")
+        btn_overlay.clicked.connect(
+            lambda: _load_image_file_dialog(self, self.viewer, 'overlay')
+        )
+        layout.addWidget(btn_overlay)
         
         btn_add_labels = QPushButton("Add Labels Layer (Masks)")
         btn_add_labels.clicked.connect(self._add_labels_layer)
@@ -429,9 +656,28 @@ class DeathEventTab(QWidget):
         layout = QVBoxLayout()
         layout.addWidget(QLabel("<b>Death Event Annotator</b>"))
 
-        btn_load_img = QPushButton("Load Image (TIFF/ND2)")
-        btn_load_img.clicked.connect(lambda: _load_image_file_dialog(self, self.viewer))
-        layout.addWidget(btn_load_img)
+        self._use_event_shapes = QCheckBox("Use event-specific marker shapes")
+        self._use_event_shapes.setChecked(True)
+        self._use_event_shapes.toggled.connect(self._refresh_marker_style)
+        layout.addWidget(self._use_event_shapes)
+
+        text_size_layout = QHBoxLayout()
+        text_size_layout.addWidget(QLabel("Cell-ID text size:"))
+        self._text_size = QSpinBox()
+        self._text_size.setRange(1, 72)
+        self._text_size.setValue(8)
+        self._text_size.valueChanged.connect(self._refresh_marker_style)
+        text_size_layout.addWidget(self._text_size)
+        layout.addLayout(text_size_layout)
+
+        legend = QLabel(
+            "<b>Marker shapes</b><br>"
+            "Apoptosis: ● Circle &nbsp; Necrosis: ■ Square<br>"
+            "Mixed: ◆ Diamond &nbsp; Alive: ▲ Triangle<br>"
+            "Other: ★ Star"
+        )
+        legend.setWordWrap(True)
+        layout.addWidget(legend)
 
         # Toggle button: stores reference so we can update its label
         self._btn_enable = QPushButton("🟢 Enable Annotation Mode")
@@ -479,13 +725,9 @@ class DeathEventTab(QWidget):
         layout.addStretch()
         self.setLayout(layout)
 
-        # Hook mouse release via napari's public callback API (napari >= 0.5)
-        # Falls back to the vispy canvas for older versions
-        try:
-            self.viewer.mouse_release_callbacks.append(self._on_mouse_release)
-        except AttributeError:
-            canvas = self.viewer.window.qt_viewer.canvas  # type: ignore[attr-defined]
-            canvas.events.mouse_release.connect(self._on_mouse_release)
+        # Public napari drag callbacks are generators whose final section is
+        # invoked on release.  This avoids depending on Window.qt_viewer.
+        self.viewer.mouse_drag_callbacks.append(self._annotation_mouse_drag)
 
         self._ensure_points_layers(self.viewer.dims.ndim)
         self.viewer.layers.selection.events.active.connect(self._on_active_layer_changed)
@@ -574,34 +816,63 @@ class DeathEventTab(QWidget):
         print(f"Deleted {len(previous) - len(current)} annotation(s) with napari's Points delete control.")
 
     def _prune_cell_id_map(self) -> None:
-        remaining_keys = {tuple(np.asarray(ann[0]).astype(int)[1:]) for ann in self.annotations}
+        remaining_keys = {self._cell_coordinate_key(ann[0]) for ann in self.annotations}
         for key in list(self.cell_id_map):
             if key not in remaining_keys:
                 del self.cell_id_map[key]
 
-    def _refresh_red_text(self) -> None:
+    def _symbols_for_event_codes(self, codes):
+        symbols = {
+            1: 'disc',
+            2: 'square',
+            3: 'diamond',
+            4: 'triangle_up',
+            5: 'star',
+        }
+        if not getattr(self, '_use_event_shapes', None) or not self._use_event_shapes.isChecked():
+            return ['disc'] * len(codes)
+        return [symbols.get(int(code), 'disc') for code in codes]
+
+    def _cell_id_text(self, cell_ids):
+        return {
+            'string': [str(cell_id) for cell_id in cell_ids],
+            'color': 'yellow',
+            'size': self._text_size.value() if hasattr(self, '_text_size') else 8,
+            'anchor': 'center',
+        } if cell_ids else []
+
+    def _refresh_marker_style(self, *args) -> None:
+        if not hasattr(self, 'points'):
+            return
+        self._refresh_red_style()
+        if self.annotations:
+            self._update_persistent_layer()
+
+    def _refresh_red_style(self) -> None:
         self._syncing_points_data = True
         try:
-            self.points.text = {
-                'string': [str(ann[3]) for ann in self.annotations],
-                'color': 'yellow',
-                'size': 20,
-                'anchor': 'center',
-            } if self.annotations else []
+            self.points.text = self._cell_id_text([ann[3] for ann in self.annotations])
+            if self.annotations:
+                self.points.symbol = self._symbols_for_event_codes(
+                    [ann[2] for ann in self.annotations]
+                )
         finally:
             self._syncing_points_data = False
+
+    # Backward-compatible internal name used by deletion synchronization.
+    def _refresh_red_text(self) -> None:
+        self._refresh_red_style()
 
     def _rebuild_red_layer(self) -> None:
         ndim = len(self.annotations[0][0]) if self.annotations else self.viewer.dims.ndim
         coords = (np.stack([ann[0] for ann in self.annotations], axis=0)
                   if self.annotations else np.empty((0, ndim)))
-        text = ({
-            'string': [str(ann[3]) for ann in self.annotations],
-            'color': 'yellow',
-            'size': 20,
-            'anchor': 'center',
-        } if self.annotations else [])
+        text = self._cell_id_text([ann[3] for ann in self.annotations])
         self._set_points_data(coords, text)
+        if self.annotations:
+            self.points.symbol = self._symbols_for_event_codes(
+                [ann[2] for ann in self.annotations]
+            )
 
     def _set_drawing_active(self, active: bool, select_tool: bool = False) -> None:
         self._drawing_active = active
@@ -654,6 +925,19 @@ class DeathEventTab(QWidget):
         if not hasattr(self, 'points'): return
         self._delete_by_indices(self.points, self.points.selected_data, delete_mode='row')
 
+    def _annotation_mouse_drag(self, viewer, event):
+        """Route a completed public napari mouse gesture to annotation."""
+        if not self._drawing_active or getattr(event, 'button', None) != 1:
+            return
+        try:
+            event.handled = True
+        except AttributeError:
+            pass
+        yield
+        while getattr(event, 'type', None) == 'mouse_move':
+            yield
+        self._on_mouse_release(event)
+
     def _on_mouse_release(self, event) -> None:
         """Intercept clicks when drawing mode is active.
 
@@ -698,6 +982,77 @@ class DeathEventTab(QWidget):
         # _add_annotation shows dialog; if user cancels, no point is added.
         self._add_annotation(pixel)
 
+    @staticmethod
+    def _default_annotation_axes(ndim):
+        defaults = {
+            2: ('Y', 'X'),
+            3: ('T', 'Y', 'X'),
+            4: ('T', 'Z', 'Y', 'X'),
+        }
+        if ndim in defaults:
+            return defaults[ndim]
+        leading = tuple(f'U{index}' for index in range(max(0, ndim - 2)))
+        return leading + ('Y', 'X')
+
+    def _reference_image_and_axes(self):
+        image = self._select_channel_zero_image()
+        if image is None:
+            return None, self._default_annotation_axes(self.viewer.dims.ndim)
+        raw_axes = getattr(image, 'metadata', {}).get('axes')
+        try:
+            axes = tuple(str(axis).upper() for axis in raw_axes)
+        except TypeError:
+            axes = ()
+        if len(axes) != image.ndim or len(set(axes)) != len(axes):
+            axes = self._default_annotation_axes(image.ndim)
+        self._show_first_channel(image, axes)
+        return image, axes
+
+    def _show_first_channel(self, image, axes):
+        if 'C' in axes:
+            channel_axis = axes.index('C')
+            try:
+                self.viewer.dims.set_current_step(channel_axis, 0)
+            except AttributeError:
+                current = list(self.viewer.dims.current_step)
+                current[channel_axis] = 0
+                self.viewer.dims.current_step = current
+
+    def _annotation_axes(self, ndim=None):
+        image, axes = self._reference_image_and_axes()
+        expected = ndim if ndim is not None else (image.ndim if image is not None else self.viewer.dims.ndim)
+        return axes if len(axes) == expected else self._default_annotation_axes(expected)
+
+    def _cell_coordinate_key(self, pixel, axes=None):
+        pixel = np.asarray(pixel).astype(int)
+        axes = axes or self._annotation_axes(len(pixel))
+        spatial = [index for index, axis in enumerate(axes) if axis not in {'T', 'C'}]
+        return tuple(pixel[index] for index in spatial)
+
+    def _annotation_pixel_from_row(self, row, axes):
+        values = []
+        current = self.viewer.dims.current_step
+        for index, axis in enumerate(axes):
+            if axis == 'T':
+                value = row['death_time']
+            elif axis == 'C':
+                value = 0
+            elif axis == 'Y':
+                value = row['y']
+            elif axis == 'X':
+                value = row['x']
+            elif axis == 'Z':
+                if 'z' not in row.index or pd.isna(row['z']):
+                    raise ValueError("the loaded image has a z axis, but the CSV has no z value")
+                value = row['z']
+            else:
+                value = current[index] if index < len(current) else 0
+            values.append(value)
+        pixel = np.asarray(values, dtype=float)
+        if not np.isfinite(pixel).all():
+            raise ValueError("coordinate values must be finite numbers")
+        return np.rint(pixel).astype(int)
+
     def _add_annotation(self, pixel: np.ndarray) -> None:
         choices = list(self.event_type_mapping.keys())
         choice, ok = QInputDialog.getItem(
@@ -712,9 +1067,11 @@ class DeathEventTab(QWidget):
             return
 
         code = self.event_type_mapping[choice]
-        frame_idx = int(self.viewer.dims.current_step[0]) if self.viewer.dims.ndim > 2 else 0
+        axes = self._annotation_axes(len(pixel))
+        time_axis = axes.index('T') if 'T' in axes else None
+        frame_idx = int(pixel[time_axis]) if time_axis is not None else 0
 
-        coord_key = tuple(pixel[1:])
+        coord_key = self._cell_coordinate_key(pixel, axes)
         if coord_key not in self.cell_id_map:
             self.cell_id_map[coord_key] = self.next_cell_id
             self.next_cell_id += 1
@@ -752,11 +1109,14 @@ class DeathEventTab(QWidget):
                 if tuple(np.asarray(pix).astype(int)) in sel_coords:
                     to_remove_idx.add(i)
         else:
-            # Match by spatial coord only (ignore time axis 0)
+            # Match only spatial axes (ignore time and channel dimensions).
             layer_data = np.asarray(layer.data)
-            sel_spatial = {tuple(layer_data[i].astype(int)[1:]) for i in selected_indices}
+            axes = self._annotation_axes(layer_data.shape[1])
+            sel_spatial = {
+                self._cell_coordinate_key(layer_data[i], axes) for i in selected_indices
+            }
             for i, (pix, *_rest) in enumerate(self.annotations):
-                if tuple(np.asarray(pix).astype(int)[1:]) in sel_spatial:
+                if self._cell_coordinate_key(pix, axes) in sel_spatial:
                     to_remove_idx.add(i)
 
         if not to_remove_idx:
@@ -794,33 +1154,40 @@ class DeathEventTab(QWidget):
         self._ensure_points_layers(target_ndim)
 
         earliest = {}
+        axes = self._annotation_axes(target_ndim)
+        time_axis = axes.index('T') if 'T' in axes else None
         for (pixel, frame_idx, code, cell_id) in self.annotations:
-            coord_key = tuple(pixel[1:])
+            coord_key = self._cell_coordinate_key(pixel, axes)
             if coord_key not in earliest or frame_idx < earliest[coord_key][1]:
                 earliest[coord_key] = (pixel, frame_idx, code, cell_id)
 
         persistent_coords = []
         persistent_ids = []
-        max_frame = int(self.viewer.dims.range[0][1]) if self.viewer.dims.ndim > 1 else 0
+        persistent_codes = []
+        max_frame = (
+            int(self.viewer.dims.range[time_axis][1])
+            if time_axis is not None else 0
+        )
 
         for (pixel, frame_idx, code, cell_id) in earliest.values():
             start_t = int(frame_idx)
             end_t = max_frame
-            for t in range(start_t, end_t + 1):
+            frames = range(start_t, end_t + 1) if time_axis is not None else (0,)
+            for t in frames:
                 coord = np.array(pixel, dtype=int).copy()
-                coord[0] = t
+                if time_axis is not None:
+                    coord[time_axis] = t
+                if 'C' in axes:
+                    coord[axes.index('C')] = 0
                 persistent_coords.append(coord)
                 persistent_ids.append(cell_id)
+                persistent_codes.append(code)
 
         if persistent_coords:
             persistent_coords = np.stack(persistent_coords, axis=0)
             self.persistent_points.data = persistent_coords
-            self.persistent_points.text = {
-                'string': [str(i) for i in persistent_ids],
-                'color': 'yellow',
-                'size': 20,
-                'anchor': 'center',
-            }
+            self.persistent_points.text = self._cell_id_text(persistent_ids)
+            self.persistent_points.symbol = self._symbols_for_event_codes(persistent_codes)
         else:
             self.persistent_points.data = np.empty((0, target_ndim))
             self.persistent_points.text = []
@@ -844,10 +1211,8 @@ class DeathEventTab(QWidget):
         # Match the annotations to the currently loaded image.  Older saves
         # include a zero-filled z column even for (time, y, x) images, so the
         # mere presence of that column must not create a fourth point axis.
-        target_ndim = self.viewer.dims.ndim
-        image_layer = self._select_channel_zero_image()
-        if image_layer is not None:
-            target_ndim = image_layer.ndim
+        image_layer, axes = self._reference_image_and_axes()
+        target_ndim = image_layer.ndim if image_layer is not None else len(axes)
 
         loaded_annotations = []
         loaded_cell_id_map = {}
@@ -858,22 +1223,8 @@ class DeathEventTab(QWidget):
 
         try:
             for _, row in df.iterrows():
-                if target_ndim <= 2:
-                    pixel = [row['y'], row['x']]
-                elif target_ndim == 3:
-                    pixel = [row['death_time'], row['y'], row['x']]
-                else:
-                    if 'z' not in df.columns or pd.isna(row['z']):
-                        raise ValueError("the loaded image has a z axis, but the CSV has no z value")
-                    # napari axis order for a time/z image is (t, z, y, x).
-                    pixel = [row['death_time'], row['z'], row['y'], row['x']]
-
-                pixel = np.asarray(pixel, dtype=float)
-                if not np.isfinite(pixel).all():
-                    raise ValueError("coordinate values must be finite numbers")
-                pixel = np.rint(pixel).astype(int)
-
-                coord_key = tuple(pixel[1:]) if target_ndim > 2 else tuple(pixel)
+                pixel = self._annotation_pixel_from_row(row, axes)
+                coord_key = self._cell_coordinate_key(pixel, axes)
                 if coord_key not in loaded_cell_id_map:
                     if 'cell_id' in df.columns and not pd.isna(row['cell_id']):
                         cell_id = int(row['cell_id'])
@@ -895,7 +1246,7 @@ class DeathEventTab(QWidget):
                         if code is None:
                             raise ValueError(f"unknown event type: {event_value!r}")
 
-                frame_idx = int(row['death_time']) if target_ndim > 2 else 0
+                frame_idx = int(row['death_time']) if 'T' in axes else 0
                 loaded_annotations.append((pixel, frame_idx, code, cell_id))
         except (TypeError, ValueError, OverflowError) as e:
             print(f"Invalid annotation CSV: {e}")
@@ -957,7 +1308,9 @@ class DeathEventTab(QWidget):
                 and layer.metadata.get('channel_names') == channel_names
             ] if channel_names and len(channel_names) > 1 else []
 
-        if len(siblings) > 1:
+        if len(siblings) > 1 and not all(
+            getattr(layer, 'blending', '') == 'additive' for layer in siblings
+        ):
             for layer in siblings:
                 layer.visible = layer is channel_zero
             print(f"Using channel 0 ({channel_zero.name}) as the annotation background.")
@@ -974,8 +1327,9 @@ class DeathEventTab(QWidget):
         codes = [ann[2] for ann in self.annotations]
         cell_ids = [ann[3] for ann in self.annotations]
 
-        x_vals = coords[:, -1]
-        y_vals = coords[:, -2]
+        axes = self._annotation_axes(coords.shape[1])
+        x_vals = coords[:, axes.index('X')] if 'X' in axes else coords[:, -1]
+        y_vals = coords[:, axes.index('Y')] if 'Y' in axes else coords[:, -2]
 
         data = {
             'cell_id': cell_ids,
@@ -984,8 +1338,8 @@ class DeathEventTab(QWidget):
             'x': x_vals,
             'y': y_vals,
         }
-        if coords.shape[1] > 3:
-            data['z'] = coords[:, -3]
+        if 'Z' in axes:
+            data['z'] = coords[:, axes.index('Z')]
         else:
             data['z'] = np.zeros(coords.shape[0])
 
@@ -1015,8 +1369,9 @@ class DeathEventTab(QWidget):
         reverse_map = {v: k for k, v in self.event_type_mapping.items()}
         labels = [reverse_map.get(c, 'Unknown') for c in codes]
 
-        x = coords[:, -1]
-        y = coords[:, -2]
+        axes = self._annotation_axes(coords.shape[1])
+        x = coords[:, axes.index('X')] if 'X' in axes else coords[:, -1]
+        y = coords[:, axes.index('Y')] if 'Y' in axes else coords[:, -2]
 
         data_decoded = {
             'cell_id': cell_ids,
@@ -1026,8 +1381,8 @@ class DeathEventTab(QWidget):
             'x': x,
             'y': y,
         }
-        if coords.shape[1] > 3:
-            data_decoded['z'] = coords[:, -3]
+        if 'Z' in axes:
+            data_decoded['z'] = coords[:, axes.index('Z')]
         else:
             data_decoded['z'] = np.zeros(coords.shape[0])
 

@@ -271,3 +271,50 @@ def test_load_annotations_uses_channel_zero_as_background(
     np.testing.assert_array_equal(np.asarray(tab.points.data), [[2, 10, 20]])
     np.testing.assert_array_equal(tab.points.scale, channel_zero.scale)
     assert tab.annotations[0][2] == 2
+
+
+def test_combined_tcyx_annotations_use_channel_zero_not_z(
+    make_napari_viewer, monkeypatch, tmp_path
+):
+    viewer = make_napari_viewer()
+    viewer.add_image(
+        np.zeros((5, 3, 64, 64)),
+        name='combined ND2',
+        metadata={'source': 'nd2', 'axes': ('T', 'C', 'Y', 'X')},
+    )
+    tab = DeathEventTab(viewer)
+    csv_path = tmp_path / 'annotations_tcyx.csv'
+    pd.DataFrame({
+        'cell_id': [4],
+        'event_code': [3],
+        'death_time': [2],
+        'x': [20],
+        'y': [10],
+    }).to_csv(csv_path, index=False)
+    monkeypatch.setattr(
+        QFileDialog, 'getOpenFileName', lambda *args, **kwargs: (str(csv_path), '')
+    )
+
+    tab._load_annotations()
+
+    np.testing.assert_array_equal(np.asarray(tab.points.data), [[2, 0, 10, 20]])
+    assert tab.cell_id_map == {(10, 20): 4}
+    assert viewer.dims.current_step[1] == 0
+
+
+def test_event_shapes_text_size_and_single_circle_toggle(make_napari_viewer):
+    viewer = make_napari_viewer()
+    viewer.add_image(np.zeros((5, 64, 64)), name='image')
+    tab = DeathEventTab(viewer)
+    _seed_death_annotations(tab)
+
+    assert [str(symbol) for symbol in tab.points.symbol] == ['disc', 'square']
+    assert tab.points.text.size == 8
+
+    tab._use_event_shapes.setChecked(False)
+    assert [str(symbol) for symbol in tab.points.symbol] == ['disc', 'disc']
+    assert set(str(symbol) for symbol in tab.persistent_points.symbol) == {'disc'}
+
+    tab._text_size.setValue(12)
+    assert tab.points.text.size == 12
+    assert tab.persistent_points.text.size == 12
